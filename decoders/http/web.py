@@ -5,6 +5,12 @@ import hashlib
 
 from httpdecoder import HTTPDecoder
 
+class ansi_colors:
+    WHITE = '\x1b[37m'
+    CYAN = '\x1b[36m' 
+    YELLOW = '\x1b[33m'
+    RED = '\x1b[31m'
+    DEFAULT = '\x1b[39m'
 
 class DshellDecoder(HTTPDecoder):
 
@@ -15,20 +21,63 @@ class DshellDecoder(HTTPDecoder):
                              filter='tcp and (port 80 or port 8080 or port 8000)',
                              filterfn=lambda ((sip, sp), (dip, dp)): sp in (
                                  80, 8000, 8080) or dp in (80, 8000, 8080),
-                             author='bg,twp',
+                             author='bg,twp, mrl',
                              optiondict={
                                  'maxurilen': {'type': 'int', 'default': 30, 'help': 'Truncate URLs longer than max len.  Set to 0 for no truncating. (default: 30)'},
-                                 'md5': {'action': 'store_true', 'help': 'calculate MD5 for each response. Available in CSV output.'}
+                                 'md5': {'action': 'store_true', 'help': 'calculate MD5 for each response. Available in CSV output.'},
+                                 'color': {'action': 'store_true', 'default': False, 'help': 'display colored output for various traffic types'}
                              },
                              )
         self.gunzip = False  # Not interested in response body
+        self.color_code = ansi_colors.WHITE
 
+    def set_color(self, contenttype, response):
+        if (contenttype in ('application/zip', 
+            'application/x-rar-compressed', 
+            'application/vnd.ms-cab-compressed')): 
+
+            # For zip file downloads, color output yellow
+            color_code = ansi_colors.YELLOW
+ 
+        elif(contenttype in ('application/x-shockwave-flash',
+            'application/vnd.adobe.flash-movie',
+            'application/x-www-form-urlencoded')):
+            
+            # For flash file downloads, color output cyan
+            color_code = ansi_colors.CYAN
+
+        elif(contenttype in ('application/x-msdownload',
+            'application/exe', 'application/x-msdos-program',
+            'application/x-exe', 'application/dos-exe',
+            'vms/exe', 'application/x-winexe', 
+            'application/msdos-windows')):
+            
+            # For executable file downloads, color output red
+            color_code = ansi_colors.RED
+
+        elif(contenttype == 'application/octet-stream'):
+            if response.body.startswith(('CWS', 'ZWS', 'FWS')):
+                # Flash: https://en.wikipedia.org/wiki/SWF
+                color_code = ansi_colors.CYAN
+            elif response.body.startswith('PK'):
+                # Zip: https://en.wikipedia.org/wiki/Zip_(file_format)
+                color_code = ansi_colors.YELLOW
+            elif response.body.startswith(('MZ', 'NE', 'LX', 'LE', 'PE')):
+                # Exe: https://en.wikipedia.org/wiki/.exe
+                color_code = ansi_colors.RED
+            else:
+                color_code = ansi_colors.WHITE
+        
+        else:
+            # White output for all other traffic
+            color_code = ansi_colors.WHITE
+        
+        return color_code 
+    
     def HTTPHandler(self, conn, request, response, requesttime, responsetime):
         host = ''
         loc = ''
         lastmodified = ''
-
-        #request_time, request, response = self.httpDict[conn.addr]
 
         # extract method,uri,host from response
         host = util.getHeader(request, 'host')
@@ -48,12 +97,16 @@ class DshellDecoder(HTTPDecoder):
         if status[:2] == '30':
             loc = util.getHeader(response, 'location')
             if len(loc):
-                loc = '-> ' + loc
+                loc = '-> {0}'.format(loc)
 
         lastmodified = util.HTTPlastmodified(response)
         referer = util.getHeader(request, 'referer')
         useragent = util.getHeader(request, 'user-agent')
         via = util.getHeader(request, 'via')
+        contenttype = util.getHeader(response, 'content-type')
+
+        if self.color:
+            self.color_code = self.set_color(contenttype, response)
 
         try:
             responsesize = len(response.body.rstrip('\0'))
@@ -80,18 +133,28 @@ class DshellDecoder(HTTPDecoder):
         else:
             uploadfile = None
 
-        requestInfo = '%s %s%s HTTP/%s' % (request.method,
-                                           host,
-                                           request.uri[:self.maxurilen] + '[truncated]' if self.maxurilen > 0 and len(
+        requestInfo = '{0} {1}{2} HTTP/{3}'.format(
+                       request.method, host,
+                       request.uri[:self.maxurilen] + '[truncated]' if self.maxurilen > 0 and len(
                                                request.uri) > self.maxurilen else request.uri,
                                            request.version)
         if response:
-            responseInfo = '%s %s %s %s' % (status, reason, loc, lastmodified)
+            responseInfo = '{0} {1} {2} {3}'.format(status, reason, loc, lastmodified)
         else:
             responseInfo = ''
 
-        self.alert("%-80s // %s" % (requestInfo, responseInfo), referer=referer, useragent=useragent, request=requestInfo, response=responseInfo, request_time=requesttime, response_time=responsetime, request_method=request.method, host=host,
-                   uri=request.uri, status=status, reason=reason, lastmodified=lastmodified, md5=md5, responsesize=responsesize, contenttype=util.getHeader(response, 'content-type'), responsefile=responsefile, uploadfile=uploadfile, via=via, **conn.info())
+        print "{0}".format(self.color_code)
+        self.alert("{0:<80} // {1}".format(requestInfo, responseInfo) , referer=referer, 
+                   useragent=useragent, request=requestInfo, response=responseInfo, 
+                   request_time=requesttime, response_time=responsetime, 
+                   request_method=request.method, host=host, uri=request.uri, 
+                   status=status, reason=reason, lastmodified=lastmodified, 
+                   md5=md5, responsesize=responsesize, 
+                   contenttype=contenttype,
+                   responsefile=responsefile, uploadfile=uploadfile, via=via, **conn.info())
+        #Reset terminal colors to the users default
+        print "{0}".format(ansi_colors.DEFAULT)
+
         if self.out.sessionwriter:
             self.write(request.data, direction='cs')
             if response:
